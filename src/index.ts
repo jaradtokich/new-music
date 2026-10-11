@@ -10,6 +10,12 @@
  */
 
 import { createClient } from '@supabase/supabase-js';
+import ws from 'ws';
+
+// Ensure WebSocket is defined across Node environments
+if (typeof (globalThis as any).WebSocket === 'undefined') {
+  (globalThis as any).WebSocket = ws;
+}
 
 // Environment credentials passed via GitHub Actions Secrets
 const SUPABASE_URL = process.env.SUPABASE_URL;
@@ -20,8 +26,16 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
   process.exit(1);
 }
 
-// Initialize Supabase admin client (Service Role bypasses RLS for inserting tracks)
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+// Initialize Supabase admin client with ws transport and non-persistent auth
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+  auth: {
+    persistSession: false,
+    autoRefreshToken: false,
+  },
+  realtime: {
+    transport: ws,
+  },
+});
 
 export interface TrackRecord {
   id: string;
@@ -44,13 +58,11 @@ async function scrapeAudius(): Promise<TrackRecord[]> {
   const tracks: TrackRecord[] = [];
 
   try {
-    // Select an active Audius discovery host
     const hostRes = await fetch('https://api.audius.co');
     const hostJson = await hostRes.json();
     const hosts: string[] = hostJson.data || ['https://discoveryprovider.audius.co'];
     const baseUrl = hosts[0] || 'https://discoveryprovider.audius.co';
 
-    // Fetch trending underground tracks
     const url = `${baseUrl}/v1/tracks/trending/underground?app_name=new-music-scraper&limit=50`;
     const res = await fetch(url, {
       headers: { 'Accept': 'application/json' }
@@ -67,7 +79,6 @@ async function scrapeAudius(): Promise<TrackRecord[]> {
     for (const item of items) {
       if (!item.id || !item.title || !item.user?.name) continue;
 
-      // Filter for undiscovered artists (under 25,000 total plays)
       const playCount = item.play_count || 0;
       if (playCount > 30000) continue;
 
@@ -129,7 +140,6 @@ async function scrapeReddit(): Promise<TrackRecord[]> {
         const postData = post.data;
         if (!postData || postData.stickied || postData.is_self) continue;
 
-        // Parse Reddit title format: "Artist - Title [Genre] (Year)"
         const rawTitle: string = postData.title || '';
         const match = rawTitle.match(/^([^-–—]+)\s*[-–—]\s*([^\[\(]+)(?:\[(.*?)\])?/);
 
@@ -142,7 +152,7 @@ async function scrapeReddit(): Promise<TrackRecord[]> {
           title = match[2].trim();
           if (match[3]) genre = match[3].trim();
         } else {
-          continue; // Skip posts that don't match standard submission syntax
+          continue;
         }
 
         const externalUrl = postData.url || `https://reddit.com${postData.permalink}`;
@@ -154,7 +164,7 @@ async function scrapeReddit(): Promise<TrackRecord[]> {
           id: `reddit_${postData.id}`,
           title,
           artist,
-          preview_url: null, // Audio stream parsed via client embedding
+          preview_url: null,
           artwork_url: artwork,
           external_urls: {
             reddit: `https://reddit.com${postData.permalink}`,
@@ -182,7 +192,6 @@ async function scrapeDeezer(): Promise<TrackRecord[]> {
   console.log('📻 [3/3] Scraping Deezer for low-rank indie previews...');
   const tracks: TrackRecord[] = [];
 
-  // Niche query keywords
   const queries = ['bedroom pop indie', 'math rock underground', 'lo-fi beats fresh', 'synthwave indie'];
   const query = queries[Math.floor(Math.random() * queries.length)];
 
@@ -201,7 +210,6 @@ async function scrapeDeezer(): Promise<TrackRecord[]> {
     for (const item of items) {
       if (!item.id || !item.title || !item.artist?.name || !item.preview) continue;
 
-      // Keep only less popular tracks (rank < 400000 on Deezer)
       const rank = item.rank || 0;
       if (rank > 450000) continue;
 
@@ -241,7 +249,6 @@ async function saveToDatabase(tracks: TrackRecord[]) {
 
   console.log(`💾 Saving ${tracks.length} total tracks to Supabase table 'tracks'...`);
 
-  // Insert in batches of 50 to maintain performance
   const batchSize = 50;
   let successCount = 0;
 
@@ -275,7 +282,6 @@ async function main() {
 
   const allTracks = [...audiusTracks, ...redditTracks, ...deezerTracks];
 
-  // Deduplicate by title + artist
   const seen = new Set<string>();
   const uniqueTracks = allTracks.filter(t => {
     const key = `${t.artist.toLowerCase()} - ${t.title.toLowerCase()}`;
