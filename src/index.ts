@@ -1,12 +1,13 @@
 /**
- * New Music Scraper
+ * New Music Scraper - High Capacity Multi-Genre Runner
  * 
- * Nightly automated runner that harvests underground and indie music from:
+ * Nightly automated runner that harvests thousands of underground,
+ * indie, and undiscovered music tracks across all major genres from:
  * - Audius (underground & low play-count tracks with playable direct audio)
- * - Reddit (r/listentothis & r/IndieMusicFeedback curated submissions)
  * - Deezer (undiscovered sub-genre searches with 30s previews)
  * 
  * Upserts deduplicated tracks into Supabase 'public.tracks'.
+ * Replaces/updates existing tracks on ID conflict so the database stays tidy.
  */
 
 import { createClient } from '@supabase/supabase-js';
@@ -17,7 +18,7 @@ if (typeof (globalThis as any).WebSocket === 'undefined') {
   (globalThis as any).WebSocket = ws;
 }
 
-// Environment credentials passed via GitHub Actions Secrets
+// Credentials passed via GitHub Actions Secrets
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
@@ -26,7 +27,7 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
   process.exit(1);
 }
 
-// Initialize Supabase admin client with ws transport and non-persistent auth
+// Initialize Supabase admin client
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
   auth: {
     persistSession: false,
@@ -52,222 +53,198 @@ export interface TrackRecord {
   scraped_at: string;
 }
 
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
 function sanitizeId(str: string): string {
   return str.toLowerCase().replace(/[^a-z0-9_]/g, '_').slice(0, 50);
 }
 
+function normalizeKey(artist: string, title: string): string {
+  const clean = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '').trim();
+  return `${clean(artist)}:::${clean(title)}`;
+}
+
+// Comprehensive genre list covering all available categories on Audius
+const AUDIUS_GENRES = [
+  'Alternative', 'Ambient', 'Classical', 'Country', 'Electronic',
+  'Experimental', 'Folk', 'Hip-Hop/Rap', 'Indie', 'Jazz',
+  'Metal', 'Pop', 'Punk', 'R&B/Soul', 'Reggae', 'Rock',
+  'Techno', 'Trap', 'House', 'Lo-Fi', 'Hyperpop', 'Acoustic',
+  'Deep House', 'Chillwave', 'World'
+];
+
+// Rich variety of subgenres and niche keywords for indie Deezer discovery
+const DEEZER_QUERIES = [
+  'indie rock', 'dream pop', 'math rock', 'shoegaze', 'post-punk',
+  'midwest emo', 'bedroom pop', 'vaporwave', 'synthwave', 'lo-fi beats',
+  'indie folk', 'neo-psychedelia', 'ambient electronic', 'hyperpop',
+  'afrobeats indie', 'alt country', 'jazz fusion', 'trip hop indie',
+  'garage rock indie', 'chillwave', 'downtempo', 'electropop indie',
+  'art pop', 'folk punk', 'slowcore', 'noise pop', 'indie surf',
+  'darkwave', 'glitch hop', 'indie electronic'
+];
+
+async function getAudiusBaseUrl(): Promise<string> {
+  try {
+    const res = await fetch('https://api.audius.co');
+    const json = await res.json();
+    return json?.data?.[0] || 'https://discoveryprovider.audius.co';
+  } catch {
+    return 'https://discoveryprovider.audius.co';
+  }
+}
+
 /**
- * 1. Scrape Audius API for indie / underground songs
+ * 1. Scrape Audius API across all available genres with pagination
  */
 async function scrapeAudius(): Promise<TrackRecord[]> {
-  console.log('🎧 [1/3] Scraping Audius underground catalog...');
+  console.log('🎧 [1/2] Scraping Audius across 25 genres and trending catalogs...');
   const tracks: TrackRecord[] = [];
+  const baseUrl = await getAudiusBaseUrl();
 
-  try {
-    const hostRes = await fetch('https://api.audius.co');
-    const hostJson = await hostRes.json();
-    const hosts: string[] = hostJson.data || ['https://discoveryprovider.audius.co'];
-    const baseUrl = hosts[0] || 'https://discoveryprovider.audius.co';
-
-    const url = `${baseUrl}/v1/tracks/trending/underground?app_name=new-music-scraper&limit=50`;
-    const res = await fetch(url, {
-      headers: { 'Accept': 'application/json' }
-    });
-
-    if (!res.ok) {
-      console.warn(`⚠️ Audius responded with status ${res.status}`);
-      return [];
-    }
-
-    const data = await res.json();
-    const items = data.data || [];
-
-    for (const item of items) {
-      if (!item.id || !item.title || !item.user?.name) continue;
-
-      const playCount = item.play_count || 0;
-      if (playCount > 30000) continue;
-
-      const trackId = `audius_${item.id}`;
-      const streamUrl = `${baseUrl}/v1/tracks/${item.id}/stream?app_name=new-music-scraper`;
-      const artwork = item.artwork?.['480x480'] || item.artwork?.['150x150'] || null;
-      const genreVal = item.genre || 'Indie';
-      const artistName = String(item.user.name).trim();
-      const artistId = `audius_${item.user.id || sanitizeId(item.user.handle || artistName)}`;
-
-      tracks.push({
-        id: trackId,
-        title: String(item.title).trim(),
-        artist: artistName,
-        artist_id: artistId,
-        preview_url: streamUrl,
-        artwork_url: artwork,
-        external_urls: {
-          audius: `https://audius.co${item.permalink || ''}`
-        },
-        source: 'audius',
-        genre: genreVal,
-        genres: [genreVal],
-        popularity: Math.min(100, Math.round((playCount / 30000) * 100)),
-        scraped_at: new Date().toISOString()
-      });
-    }
-
-    console.log(`✅ Audius: Harvested ${tracks.length} underground tracks.`);
-  } catch (err) {
-    console.error('❌ Failed scraping Audius:', err);
-  }
-
-  return tracks;
-}
-
-/**
- * 2. Scrape Reddit music curation communities (r/listentothis, r/IndieMusicFeedback)
- */
-async function scrapeReddit(): Promise<TrackRecord[]> {
-  console.log('📻 [2/3] Scraping Reddit indie music communities...');
-  const tracks: TrackRecord[] = [];
-
-  const subreddits = ['listentothis', 'IndieMusicFeedback'];
-
-  for (const sub of subreddits) {
+  // A. Trending Underground (pages 0, 50, 100)
+  for (const offset of [0, 50, 100]) {
     try {
-      const url = `https://www.reddit.com/r/${sub}/hot.json?limit=30`;
-      const res = await fetch(url, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+      const url = `${baseUrl}/v1/tracks/trending/underground?app_name=new-music-scraper&limit=50&offset=${offset}`;
+      const res = await fetch(url, { headers: { Accept: 'application/json' } });
+      if (res.ok) {
+        const json = await res.json();
+        const items = json?.data || [];
+        for (const item of items) {
+          if (!item.id || !item.title || !item.user?.name) continue;
+          if ((item.play_count || 0) > 35000) continue; // Keep genuinely undiscovered tracks
+
+          const artistName = String(item.user.name).trim();
+          const genre = item.genre || 'Underground';
+          tracks.push({
+            id: `audius_${item.id}`,
+            title: String(item.title).trim(),
+            artist: artistName,
+            artist_id: `audius_${item.user.id || sanitizeId(item.user.handle || artistName)}`,
+            preview_url: `${baseUrl}/v1/tracks/${item.id}/stream?app_name=new-music-scraper`,
+            artwork_url: item.artwork?.['480x480'] || item.artwork?.['150x150'] || null,
+            external_urls: { audius: `https://audius.co${item.permalink || ''}` },
+            source: 'audius',
+            genre,
+            genres: [genre],
+            popularity: Math.min(100, Math.round(((item.play_count || 0) / 35000) * 100)),
+            scraped_at: new Date().toISOString(),
+          });
         }
-      });
-
-      if (!res.ok) {
-        console.warn(`⚠️ Reddit r/${sub} responded with status ${res.status}`);
-        continue;
       }
-
-      const json = await res.json();
-      const posts = json?.data?.children || [];
-
-      for (const post of posts) {
-        const postData = post.data;
-        if (!postData || postData.stickied || postData.is_self) continue;
-
-        const rawTitle: string = postData.title || '';
-        const match = rawTitle.match(/^([^-–—]+)\s*[-–—]\s*([^\[\(]+)(?:\[(.*?)\])?/);
-
-        let artist = '';
-        let title = '';
-        let genre = 'Indie Discovery';
-
-        if (match) {
-          artist = match[1].trim();
-          title = match[2].trim();
-          if (match[3]) genre = match[3].trim();
-        } else {
-          continue;
-        }
-
-        const externalUrl = postData.url || `https://reddit.com${postData.permalink}`;
-        const artwork = (postData.thumbnail && postData.thumbnail.startsWith('http')) 
-          ? postData.thumbnail 
-          : null;
-
-        tracks.push({
-          id: `reddit_${postData.id}`,
-          title,
-          artist,
-          artist_id: `reddit_${sanitizeId(postData.author || artist)}`,
-          preview_url: null,
-          artwork_url: artwork,
-          external_urls: {
-            reddit: `https://reddit.com${postData.permalink}`,
-            media: externalUrl
-          },
-          source: 'reddit',
-          genre,
-          genres: [genre],
-          popularity: Math.min(100, Math.max(5, postData.score || 10)),
-          scraped_at: new Date().toISOString()
-        });
-      }
-    } catch (err) {
-      console.error(`❌ Failed scraping r/${sub}:`, err);
+      await sleep(100);
+    } catch (e) {
+      console.warn(`Audius underground offset ${offset} failed:`, e);
     }
   }
 
-  console.log(`✅ Reddit: Harvested ${tracks.length} community submissions.`);
+  // B. Loop across all 25 genres (2 pages each = 100 tracks per genre)
+  for (const g of AUDIUS_GENRES) {
+    for (const offset of [0, 50]) {
+      try {
+        const url = `${baseUrl}/v1/tracks/trending?app_name=new-music-scraper&genre=${encodeURIComponent(g)}&limit=50&offset=${offset}`;
+        const res = await fetch(url, { headers: { Accept: 'application/json' } });
+        if (!res.ok) continue;
+
+        const json = await res.json();
+        const items = json?.data || [];
+        for (const item of items) {
+          if (!item.id || !item.title || !item.user?.name) continue;
+          if ((item.play_count || 0) > 35000) continue;
+
+          const artistName = String(item.user.name).trim();
+          tracks.push({
+            id: `audius_${item.id}`,
+            title: String(item.title).trim(),
+            artist: artistName,
+            artist_id: `audius_${item.user.id || sanitizeId(item.user.handle || artistName)}`,
+            preview_url: `${baseUrl}/v1/tracks/${item.id}/stream?app_name=new-music-scraper`,
+            artwork_url: item.artwork?.['480x480'] || item.artwork?.['150x150'] || null,
+            external_urls: { audius: `https://audius.co${item.permalink || ''}` },
+            source: 'audius',
+            genre: g,
+            genres: [g],
+            popularity: Math.min(100, Math.round(((item.play_count || 0) / 35000) * 100)),
+            scraped_at: new Date().toISOString(),
+          });
+        }
+        await sleep(100);
+      } catch (e) {
+        console.warn(`Audius genre ${g} offset ${offset} error:`, e);
+      }
+    }
+  }
+
+  console.log(`✅ Audius: Harvested ${tracks.length} raw tracks across ${AUDIUS_GENRES.length} genres.`);
   return tracks;
 }
 
 /**
- * 3. Scrape Deezer indie queries for tracks with 30s audio previews
+ * 2. Scrape Deezer indie queries with pagination for tracks with 30s audio previews
  */
 async function scrapeDeezer(): Promise<TrackRecord[]> {
-  console.log('📡 [3/3] Scraping Deezer for low-rank indie previews...');
+  console.log(`📻 [2/2] Scraping Deezer across ${DEEZER_QUERIES.length} indie subgenre queries...`);
   const tracks: TrackRecord[] = [];
 
-  const queries = ['bedroom pop indie', 'math rock underground', 'lo-fi beats fresh', 'synthwave indie'];
-  const query = queries[Math.floor(Math.random() * queries.length)];
+  for (const q of DEEZER_QUERIES) {
+    for (const index of [0, 50]) {
+      try {
+        const url = `https://api.deezer.com/search?q=${encodeURIComponent(q)}&limit=50&index=${index}`;
+        const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+        if (!res.ok) continue;
 
-  try {
-    const url = `https://api.deezer.com/search?q=${encodeURIComponent(query)}&limit=40`;
-    const res = await fetch(url);
+        const json = await res.json();
+        const items = json?.data || [];
 
-    if (!res.ok) {
-      console.warn(`⚠️ Deezer responded with status ${res.status}`);
-      return [];
+        for (const item of items) {
+          if (!item.id || !item.title || !item.artist?.name || !item.preview) continue;
+          const rank = item.rank || 0;
+          if (rank > 450000) continue; // Keep low-rank / indie discoveries
+
+          const artistName = String(item.artist.name).trim();
+          const genreTag = q.split(' ')[0] || 'Indie';
+
+          tracks.push({
+            id: `deezer_${item.id}`,
+            title: String(item.title).trim(),
+            artist: artistName,
+            artist_id: `deezer_${item.artist.id || sanitizeId(artistName)}`,
+            preview_url: item.preview,
+            artwork_url: item.album?.cover_medium || item.album?.cover_big || null,
+            external_urls: {
+              deezer: item.link || '',
+              artist: item.artist.link || ''
+            },
+            source: 'deezer',
+            genre: genreTag,
+            genres: [genreTag, q],
+            popularity: Math.min(100, Math.round((rank / 450000) * 100)),
+            scraped_at: new Date().toISOString(),
+          });
+        }
+        await sleep(120);
+      } catch (e) {
+        console.warn(`Deezer query "${q}" index ${index} error:`, e);
+      }
     }
-
-    const json = await res.json();
-    const items = json.data || [];
-
-    for (const item of items) {
-      if (!item.id || !item.title || !item.artist?.name || !item.preview) continue;
-
-      const rank = item.rank || 0;
-      if (rank > 450000) continue;
-
-      const genreVal = query.split(' ')[0] || 'Indie';
-      const artistName = String(item.artist.name).trim();
-
-      tracks.push({
-        id: `deezer_${item.id}`,
-        title: String(item.title).trim(),
-        artist: artistName,
-        artist_id: `deezer_${item.artist.id || sanitizeId(artistName)}`,
-        preview_url: item.preview,
-        artwork_url: item.album?.cover_medium || item.album?.cover_big || null,
-        external_urls: {
-          deezer: item.link || '',
-          artist: item.artist.link || ''
-        },
-        source: 'deezer',
-        genre: genreVal,
-        genres: [genreVal],
-        popularity: Math.min(100, Math.round((rank / 450000) * 100)),
-        scraped_at: new Date().toISOString()
-      });
-    }
-
-    console.log(`✅ Deezer: Harvested ${tracks.length} indie preview tracks.`);
-  } catch (err) {
-    console.error('❌ Failed scraping Deezer:', err);
   }
 
+  console.log(`✅ Deezer: Harvested ${tracks.length} indie preview tracks.`);
   return tracks;
 }
 
 /**
  * Batch Upsert to Supabase
+ * Uses onConflict: 'id' to UPDATE existing tracks instead of creating duplicates.
  */
 async function saveToDatabase(tracks: TrackRecord[]) {
   if (tracks.length === 0) {
-    console.log('ℹ️ No new tracks to insert.');
+    console.log('ℹ️ No tracks to insert.');
     return;
   }
 
-  console.log(`💾 Saving ${tracks.length} total tracks to Supabase table 'tracks'...`);
-
-  const batchSize = 50;
+  console.log(`💾 Upserting ${tracks.length} tracks to Supabase 'tracks' table...`);
+  const batchSize = 100;
   let successCount = 0;
   let hasErrors = false;
 
@@ -279,10 +256,15 @@ async function saveToDatabase(tracks: TrackRecord[]) {
 
     if (error) {
       hasErrors = true;
-      console.error(`❌ Supabase error inserting batch ${i / batchSize + 1}:`, error.message);
+      console.error(`❌ Supabase error inserting batch ${Math.floor(i / batchSize) + 1}:`, error.message);
     } else {
       successCount += batch.length;
     }
+
+    if ((i + batchSize) % 500 === 0 || i + batchSize >= tracks.length) {
+      console.log(`   ↳ Progress: ${successCount}/${tracks.length} tracks synced.`);
+    }
+    await sleep(50);
   }
 
   console.log(`🎉 Successfully synced ${successCount}/${tracks.length} tracks into Supabase!`);
@@ -296,25 +278,28 @@ async function saveToDatabase(tracks: TrackRecord[]) {
  * Main Execution Entrypoint
  */
 async function main() {
-  console.log('🚀 Starting nightly music discovery scraper at', new Date().toISOString());
+  console.log('🚀 Starting high-capacity music discovery scraper at', new Date().toISOString());
 
-  const [audiusTracks, redditTracks, deezerTracks] = await Promise.all([
+  const [audiusTracks, deezerTracks] = await Promise.all([
     scrapeAudius(),
-    scrapeReddit(),
-    scrapeDeezer()
+    scrapeDeezer(),
   ]);
 
-  const allTracks = [...audiusTracks, ...redditTracks, ...deezerTracks];
+  const allTracks = [...audiusTracks, ...deezerTracks];
 
-  const seen = new Set<string>();
-  const uniqueTracks = allTracks.filter(t => {
-    const key = `${t.artist.toLowerCase()} - ${t.title.toLowerCase()}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
+  // In-memory deduplication by normalized (artist + title) and id
+  const seenKeys = new Set<string>();
+  const uniqueTracks: TrackRecord[] = [];
 
-  console.log(`✨ Total collected: ${allTracks.length} | Unique: ${uniqueTracks.length}`);
+  for (const t of allTracks) {
+    const key = normalizeKey(t.artist, t.title);
+    if (seenKeys.has(key) || seenKeys.has(t.id)) continue;
+    seenKeys.add(key);
+    seenKeys.add(t.id);
+    uniqueTracks.push(t);
+  }
+
+  console.log(`📊 Scrape Summary: Total raw collected: ${allTracks.length} | Unique deduplicated: ${uniqueTracks.length}`);
 
   await saveToDatabase(uniqueTracks);
   console.log('🏁 Scraper finished cleanly.');
