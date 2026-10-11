@@ -41,6 +41,7 @@ export interface TrackRecord {
   id: string;
   title: string;
   artist: string;
+  artist_id: string;
   preview_url: string | null;
   artwork_url: string | null;
   external_urls: Record<string, string>;
@@ -49,6 +50,10 @@ export interface TrackRecord {
   genres: string[];
   popularity: number;
   scraped_at: string;
+}
+
+function sanitizeId(str: string): string {
+  return str.toLowerCase().replace(/[^a-z0-9_]/g, '_').slice(0, 50);
 }
 
 /**
@@ -87,11 +92,14 @@ async function scrapeAudius(): Promise<TrackRecord[]> {
       const streamUrl = `${baseUrl}/v1/tracks/${item.id}/stream?app_name=new-music-scraper`;
       const artwork = item.artwork?.['480x480'] || item.artwork?.['150x150'] || null;
       const genreVal = item.genre || 'Indie';
+      const artistName = String(item.user.name).trim();
+      const artistId = `audius_${item.user.id || sanitizeId(item.user.handle || artistName)}`;
 
       tracks.push({
         id: trackId,
         title: String(item.title).trim(),
-        artist: String(item.user.name).trim(),
+        artist: artistName,
+        artist_id: artistId,
         preview_url: streamUrl,
         artwork_url: artwork,
         external_urls: {
@@ -167,6 +175,7 @@ async function scrapeReddit(): Promise<TrackRecord[]> {
           id: `reddit_${postData.id}`,
           title,
           artist,
+          artist_id: `reddit_${sanitizeId(postData.author || artist)}`,
           preview_url: null,
           artwork_url: artwork,
           external_urls: {
@@ -218,11 +227,13 @@ async function scrapeDeezer(): Promise<TrackRecord[]> {
       if (rank > 450000) continue;
 
       const genreVal = query.split(' ')[0] || 'Indie';
+      const artistName = String(item.artist.name).trim();
 
       tracks.push({
         id: `deezer_${item.id}`,
         title: String(item.title).trim(),
-        artist: String(item.artist.name).trim(),
+        artist: artistName,
+        artist_id: `deezer_${item.artist.id || sanitizeId(artistName)}`,
         preview_url: item.preview,
         artwork_url: item.album?.cover_medium || item.album?.cover_big || null,
         external_urls: {
