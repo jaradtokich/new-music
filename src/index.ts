@@ -45,6 +45,7 @@ export interface TrackRecord {
   artwork_url: string | null;
   external_urls: Record<string, string>;
   source: string;
+  genre: string;
   genres: string[];
   popularity: number;
   scraped_at: string;
@@ -54,7 +55,7 @@ export interface TrackRecord {
  * 1. Scrape Audius API for indie / underground songs
  */
 async function scrapeAudius(): Promise<TrackRecord[]> {
-  console.log('🎵 [1/3] Scraping Audius underground catalog...');
+  console.log('🎧 [1/3] Scraping Audius underground catalog...');
   const tracks: TrackRecord[] = [];
 
   try {
@@ -85,6 +86,7 @@ async function scrapeAudius(): Promise<TrackRecord[]> {
       const trackId = `audius_${item.id}`;
       const streamUrl = `${baseUrl}/v1/tracks/${item.id}/stream?app_name=new-music-scraper`;
       const artwork = item.artwork?.['480x480'] || item.artwork?.['150x150'] || null;
+      const genreVal = item.genre || 'Indie';
 
       tracks.push({
         id: trackId,
@@ -96,7 +98,8 @@ async function scrapeAudius(): Promise<TrackRecord[]> {
           audius: `https://audius.co${item.permalink || ''}`
         },
         source: 'audius',
-        genres: item.genre ? [item.genre] : ['Indie'],
+        genre: genreVal,
+        genres: [genreVal],
         popularity: Math.min(100, Math.round((playCount / 30000) * 100)),
         scraped_at: new Date().toISOString()
       });
@@ -114,7 +117,7 @@ async function scrapeAudius(): Promise<TrackRecord[]> {
  * 2. Scrape Reddit music curation communities (r/listentothis, r/IndieMusicFeedback)
  */
 async function scrapeReddit(): Promise<TrackRecord[]> {
-  console.log('🤖 [2/3] Scraping Reddit indie music communities...');
+  console.log('📻 [2/3] Scraping Reddit indie music communities...');
   const tracks: TrackRecord[] = [];
 
   const subreddits = ['listentothis', 'IndieMusicFeedback'];
@@ -124,7 +127,7 @@ async function scrapeReddit(): Promise<TrackRecord[]> {
       const url = `https://www.reddit.com/r/${sub}/hot.json?limit=30`;
       const res = await fetch(url, {
         headers: {
-          'User-Agent': 'Mozilla/5.0 (compatible; NewMusicScraper/1.0; +https://github.com/jaradtokich/new-music)'
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         }
       });
 
@@ -171,6 +174,7 @@ async function scrapeReddit(): Promise<TrackRecord[]> {
             media: externalUrl
           },
           source: 'reddit',
+          genre,
           genres: [genre],
           popularity: Math.min(100, Math.max(5, postData.score || 10)),
           scraped_at: new Date().toISOString()
@@ -189,7 +193,7 @@ async function scrapeReddit(): Promise<TrackRecord[]> {
  * 3. Scrape Deezer indie queries for tracks with 30s audio previews
  */
 async function scrapeDeezer(): Promise<TrackRecord[]> {
-  console.log('📻 [3/3] Scraping Deezer for low-rank indie previews...');
+  console.log('📡 [3/3] Scraping Deezer for low-rank indie previews...');
   const tracks: TrackRecord[] = [];
 
   const queries = ['bedroom pop indie', 'math rock underground', 'lo-fi beats fresh', 'synthwave indie'];
@@ -213,6 +217,8 @@ async function scrapeDeezer(): Promise<TrackRecord[]> {
       const rank = item.rank || 0;
       if (rank > 450000) continue;
 
+      const genreVal = query.split(' ')[0] || 'Indie';
+
       tracks.push({
         id: `deezer_${item.id}`,
         title: String(item.title).trim(),
@@ -224,7 +230,8 @@ async function scrapeDeezer(): Promise<TrackRecord[]> {
           artist: item.artist.link || ''
         },
         source: 'deezer',
-        genres: [query.split(' ')[0] || 'Indie'],
+        genre: genreVal,
+        genres: [genreVal],
         popularity: Math.min(100, Math.round((rank / 450000) * 100)),
         scraped_at: new Date().toISOString()
       });
@@ -251,6 +258,7 @@ async function saveToDatabase(tracks: TrackRecord[]) {
 
   const batchSize = 50;
   let successCount = 0;
+  let hasErrors = false;
 
   for (let i = 0; i < tracks.length; i += batchSize) {
     const batch = tracks.slice(i, i + batchSize);
@@ -259,6 +267,7 @@ async function saveToDatabase(tracks: TrackRecord[]) {
       .upsert(batch, { onConflict: 'id', ignoreDuplicates: false });
 
     if (error) {
+      hasErrors = true;
       console.error(`❌ Supabase error inserting batch ${i / batchSize + 1}:`, error.message);
     } else {
       successCount += batch.length;
@@ -266,6 +275,10 @@ async function saveToDatabase(tracks: TrackRecord[]) {
   }
 
   console.log(`🎉 Successfully synced ${successCount}/${tracks.length} tracks into Supabase!`);
+
+  if (hasErrors && successCount === 0) {
+    throw new Error('All Supabase insert batches failed. Check table schema and column names.');
+  }
 }
 
 /**
