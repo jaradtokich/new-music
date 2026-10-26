@@ -126,7 +126,7 @@ async function scrapeAudius(): Promise<TrackRecord[]> {
   const baseUrl = await getAudiusBaseUrl();
 
   // A. Underground trending (pagination: 0, 50, 100, 150)
-  for (const offset of [0, 50, 100, 150]) {
+  for (const offset of [0, 50, 100, 150, 200, 250]) {
     try {
       const url = `${baseUrl}/v1/tracks/trending/underground?app_name=new-music-scraper&limit=50&offset=${offset}`;
       const res = await fetch(url, { headers: { Accept: 'application/json', 'User-Agent': 'Mozilla/5.0' } });
@@ -135,7 +135,7 @@ async function scrapeAudius(): Promise<TrackRecord[]> {
         const items = json?.data || [];
         for (const item of items) {
           if (!item.id || !item.title || !item.user?.name) continue;
-          if ((item.play_count || 0) > 35000) continue;
+          if ((item.play_count || 0) > 75000) continue;
 
           const artistName = String(item.user.name).trim();
           const genre = item.genre || 'Underground';
@@ -150,7 +150,7 @@ async function scrapeAudius(): Promise<TrackRecord[]> {
             source: 'audius',
             genre,
             genres: [genre],
-            popularity: Math.min(100, Math.round(((item.play_count || 0) / 35000) * 100)),
+            popularity: Math.min(100, Math.round(((item.play_count || 0) / 75000) * 100)),
             scraped_at: new Date().toISOString(),
           });
         }
@@ -163,7 +163,7 @@ async function scrapeAudius(): Promise<TrackRecord[]> {
 
   // B. Loop across all 25 genres (offsets 0, 50, 100)
   for (const g of AUDIUS_GENRES) {
-    for (const offset of [0, 50, 100]) {
+    for (const offset of [0, 50, 100, 150]) {
       try {
         const url = `${baseUrl}/v1/tracks/trending?app_name=new-music-scraper&genre=${encodeURIComponent(g)}&limit=50&offset=${offset}`;
         const res = await fetch(url, { headers: { Accept: 'application/json', 'User-Agent': 'Mozilla/5.0' } });
@@ -173,7 +173,7 @@ async function scrapeAudius(): Promise<TrackRecord[]> {
         const items = json?.data || [];
         for (const item of items) {
           if (!item.id || !item.title || !item.user?.name) continue;
-          if ((item.play_count || 0) > 35000) continue;
+          if ((item.play_count || 0) > 75000) continue;
 
           const artistName = String(item.user.name).trim();
           tracks.push({
@@ -187,7 +187,7 @@ async function scrapeAudius(): Promise<TrackRecord[]> {
             source: 'audius',
             genre: g,
             genres: [g],
-            popularity: Math.min(100, Math.round(((item.play_count || 0) / 35000) * 100)),
+            popularity: Math.min(100, Math.round(((item.play_count || 0) / 75000) * 100)),
             scraped_at: new Date().toISOString(),
           });
         }
@@ -211,7 +211,7 @@ async function scrapeDeezer(): Promise<TrackRecord[]> {
 
   // A. Subgenre keyword sweeps
   for (const q of DEEZER_QUERIES) {
-    for (const index of [0, 50]) {
+    for (const index of [0, 50, 100, 150]) {
       try {
         const url = `https://api.deezer.com/search?q=${encodeURIComponent(q)}&limit=50&index=${index}`;
         const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
@@ -223,7 +223,7 @@ async function scrapeDeezer(): Promise<TrackRecord[]> {
         for (const item of items) {
           if (!item.id || !item.title || !item.artist?.name || !item.preview) continue;
           const rank = item.rank || 0;
-          if (rank > 450000) continue;
+          if (rank > 650000) continue;
 
           const artistName = String(item.artist.name).trim();
           const genreTag = q.split(' ')[0] || 'Indie';
@@ -242,7 +242,7 @@ async function scrapeDeezer(): Promise<TrackRecord[]> {
             source: 'deezer',
             genre: genreTag,
             genres: [genreTag, q],
-            popularity: Math.min(100, Math.round((rank / 450000) * 100)),
+            popularity: Math.min(100, Math.round((rank / 650000) * 100)),
             scraped_at: new Date().toISOString(),
           });
         }
@@ -332,7 +332,7 @@ async function scrapeItunes(): Promise<TrackRecord[]> {
 
   for (const q of ITUNES_QUERIES) {
     try {
-      const url = `https://itunes.apple.com/search?term=${encodeURIComponent(q)}&media=music&entity=song&limit=50`;
+      const url = `https://itunes.apple.com/search?term=${encodeURIComponent(q)}&media=music&entity=song&limit=100`;
       const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
       if (!res.ok) continue;
 
